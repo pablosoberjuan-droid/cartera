@@ -97,6 +97,12 @@ from m13_gas_europa import (
     plot_flujos,
     plot_llenado,
 )
+from m14_fundamentales import (
+    ErrorFundamental,
+    comparar_empresas,
+    ficha_empresa,
+    resumen_para_analisis,
+)
 
 # =============================================================================
 # CONFIGURACIÓN DE LA PÁGINA
@@ -175,6 +181,16 @@ def cargar_energia_larga(anios: float):
 @st.cache_data(ttl=900, show_spinner="Descargando almacenamiento de gas europeo (GIE)...")
 def cargar_gas_europa(paises: tuple[str, ...], anios: float, api_key: str):
     return analizar_gas_europeo(list(paises), anios=anios, api_key=api_key)
+
+
+@st.cache_data(ttl=86400, show_spinner="Consultando fundamentales (FMP)...")
+def cargar_fundamentales(tickers: tuple[str, ...], api_key: str):
+    return comparar_empresas(list(tickers), api_key=api_key)
+
+
+@st.cache_data(ttl=86400, show_spinner="Descargando ficha detallada...")
+def cargar_ficha_empresa(ticker: str, api_key: str):
+    return ficha_empresa(ticker, api_key=api_key)
 
 
 @st.cache_data(ttl=900, show_spinner="Descargando universo de candidatos (puede tardar un minuto)...")
@@ -329,7 +345,7 @@ barra_superior(st, _celdas_kpi)
 pestanas = st.tabs([
     "📈 Resumen", "🔗 Correlaciones", "🎯 Optimización",
     "📉 Volatilidad histórica", "🌐 Superficie implícita", "🧭 Recomendaciones",
-    "⚡ Energía", "🌍 Gas Europa",
+    "⚡ Energía", "🌍 Gas Europa", "📊 Fundamentales",
 ])
 
 
@@ -934,6 +950,87 @@ with pestanas[7]:
                 st.error(f"GIE: {exc}")
             except Exception as exc:
                 st.error(f"No se pudo completar el análisis de gas europeo: {exc}")
+                st.code(traceback.format_exc())
+
+
+# ------------------------------------------------------------ Fundamentales ---
+with pestanas[8]:
+    st.info(
+        "Análisis fundamental (Financial Modeling Prep): rentabilidad, solidez financiera, "
+        "crecimiento y valoración, resumidos en una puntuación 0-100 por dimensión. "
+        "⚠ El plan gratuito de FMP cubre **solo empresas de EE.UU.** — RHM.DE, IDR.MC, MC.PA "
+        "y EUNL.DE no están disponibles (los fondos/ETFs tampoco publican estados financieros "
+        "aunque tuvieras plan de pago). Útil aquí para cribar CANDIDATOS estadounidenses, no "
+        "para valorar tu cartera actual."
+    )
+
+    clave_fmp = os.environ.get("FMP_API_KEY") or st.session_state.get("fmp_api_key", "")
+    with st.expander("🔑 Clave de API de FMP", expanded=not clave_fmp):
+        entrada_clave_fmp = st.text_input(
+            "FMP_API_KEY", value=clave_fmp, type="password",
+            help="Gratis en site.financialmodelingprep.com/developer/docs. Se usa solo en "
+                 "esta sesión del navegador; no se guarda en ningún archivo.",
+        )
+        if entrada_clave_fmp:
+            st.session_state["fmp_api_key"] = entrada_clave_fmp
+        clave_fmp = entrada_clave_fmp
+
+    if not clave_fmp:
+        st.warning("Introduce tu clave de FMP arriba para consultar fundamentales.")
+    else:
+        texto_tickers_fmp = st.text_input(
+            "Tickers a comparar (EE.UU., separados por espacio o coma)",
+            value="LMT, RTX, NOC, GD, LHX",
+            help="Ejemplo: sector defensa de EE.UU. — el más cercano a tu RHM.DE.",
+        )
+        tickers_fmp = tuple(t.strip().upper() for t in texto_tickers_fmp.replace(",", " ").split() if t.strip())
+
+        if not tickers_fmp:
+            st.warning("Escribe al menos un ticker.")
+        else:
+            try:
+                tabla_fmp = cargar_fundamentales(tickers_fmp, clave_fmp)
+
+                st.subheader("Comparativa y puntuación")
+                st.latex(
+                    r"\text{Puntuación}_{dim} = \frac{1}{n}\sum_i "
+                    r"\text{clip}\!\left(\frac{x_i - malo_i}{bueno_i - malo_i}, 0, 100\right)"
+                )
+                st.caption(
+                    "Cada métrica se normaliza linealmente entre un umbral 'malo' y uno 'bueno' "
+                    "(p.ej. Deuda neta/EBITDA: malo ≥4×, bueno ≤1×) y se promedian por dimensión "
+                    "(Rentabilidad, Solidez, Crecimiento, Valoración). **Es una heurística de "
+                    "cribado, no una valoración** — ignora sector, equipo gestor, foso "
+                    "competitivo y regulación. Un 85/100 no significa \"comprar\"."
+                )
+                st.dataframe(tabla_fmp, use_container_width=True)
+
+                st.subheader("Ficha detallada")
+                ticker_detalle = st.selectbox("Empresa", tabla_fmp.index.tolist())
+                ficha = cargar_ficha_empresa(ticker_detalle, clave_fmp)
+
+                col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+                col_f1.metric("Puntuación total", f"{ficha.puntuacion.get('TOTAL', float('nan')):.0f}/100")
+                col_f2.metric("ROE", f"{ficha.metricas.get('ROE %', float('nan')):.1f}%")
+                col_f3.metric("Deuda neta/EBITDA", f"{ficha.metricas.get('Deuda neta/EBITDA', float('nan')):.2f}×")
+                col_f4.metric("PER", f"{ficha.metricas.get('PER', float('nan')):.1f}")
+
+                col_g1, col_g2 = st.columns(2)
+                col_g1.subheader("Métricas del último ejercicio")
+                col_g1.dataframe(ficha.metricas.dropna().to_frame("Valor"), use_container_width=True)
+                col_g2.subheader("Evolución por ejercicio")
+                col_g2.dataframe(ficha.tendencias, use_container_width=True)
+
+                st.subheader("Diagnóstico")
+                for alerta in ficha.alertas:
+                    st.write(alerta)
+
+                with st.expander("📋 Resumen en texto (para pegar en el chat y pedir contexto cualitativo)"):
+                    st.code(resumen_para_analisis(ficha), language=None)
+            except ErrorFundamental as exc:
+                st.error(f"FMP: {exc}")
+            except Exception as exc:
+                st.error(f"No se pudo completar el análisis fundamental: {exc}")
                 st.code(traceback.format_exc())
 
 
