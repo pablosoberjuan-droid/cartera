@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-cartera",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "streamlit", "run", "m9_dashboard.py", "--server.headless", "true"],
+      "port": 8501
+    }
+  ]
+}
