@@ -5,7 +5,14 @@
       "name": "dashboard-cartera",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "streamlit", "run", "m9_dashboard.py", "--server.headless", "true"],
-      "port": 8501
+      "port": 8501,
+      "autoPort": false
+    },
+    {
+      "name": "contenedor-streamlit",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "streamlit", "run", "/Users/Pablo/Desktop/cnt2/app.py", "--server.port=8502", "--server.address=0.0.0.0", "--server.headless=true"],
+      "port": 8502
     }
   ]
 }
