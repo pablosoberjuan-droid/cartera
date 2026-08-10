@@ -50,8 +50,10 @@ Uso rápido
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -61,7 +63,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import requests
 import seaborn as sns
 from matplotlib.figure import Figure
 
@@ -85,6 +86,57 @@ OBJETIVO_UE_LLENADO = 90.0
 
 class ErrorDeGIE(Exception):
     """Se lanza cuando la API de GIE no responde o devuelve datos inválidos."""
+
+
+# =============================================================================
+# TRANSPORTE HTTP CON TIMEOUT DE VERDAD
+# =============================================================================
+# `requests.get(timeout=N)` NO garantiza que la llamada dure como mucho N
+# segundos: ese timeout es "por lectura" (se reinicia con cada byte que llega),
+# no un límite de pared. Si el portátil se suspende a mitad de una petición
+# (o si el socket queda en un estado zombi por cualquier otro motivo de red),
+# la conexión puede quedarse colgada indefinidamente sin que Python lo note
+# — es justo lo que le pasó a este módulo: una descarga de AGSI+ se quedó
+# esperando toda la noche. `curl -m` sí impone un límite de pared real, y
+# aquí además se envuelve en un timeout de subprocess como segundo cinturón
+# de seguridad por si el propio curl se queda atascado.
+
+def _get_json_gie(
+    url: str, parametros: dict, cabeceras: dict[str, str], timeout: float,
+) -> tuple[int, dict]:
+    """GET con límite de tiempo de PARED real. Devuelve (código_http, json)."""
+    argumentos = ["curl", "-sS", "-m", str(timeout), "-w", "\n%{http_code}"]
+    for clave, valor in cabeceras.items():
+        argumentos += ["-H", f"{clave}: {valor}"]
+    for clave, valor in parametros.items():
+        argumentos += ["--data-urlencode", f"{clave}={valor}"]
+    argumentos += ["-G", url]
+
+    try:
+        resultado = subprocess.run(
+            argumentos, capture_output=True, text=True, timeout=timeout + 10,
+        )
+    except subprocess.TimeoutExpired:
+        raise ErrorDeGIE(
+            f"La petición a GIE no respondió en {timeout + 10:.0f}s incluso con curl — "
+            "la conexión parece atascada a nivel de red. Prueba a comprobar tu conexión "
+            "(o si el Mac se suspendió a mitad de la descarga) y reinténtalo."
+        )
+    except FileNotFoundError:
+        raise ErrorDeGIE("No se encontró el comando 'curl' en este sistema.")
+
+    if resultado.returncode != 0:
+        raise ErrorDeGIE(f"curl falló (código {resultado.returncode}): {resultado.stderr[:200]}")
+
+    cuerpo, _, codigo = resultado.stdout.rpartition("\n")
+    codigo_http = int(codigo) if codigo.strip().isdigit() else 0
+
+    try:
+        carga = json.loads(cuerpo) if cuerpo.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ErrorDeGIE(f"Respuesta no válida de GIE (HTTP {codigo_http}): {exc}") from exc
+
+    return codigo_http, carga
 
 
 # =============================================================================
@@ -249,28 +301,20 @@ def descargar_agsi(
         if pais.upper() != "EU":
             parametros["country"] = pais.upper()
 
-        try:
-            respuesta = requests.get(
-                URL_AGSI, params=parametros, headers=cabeceras, timeout=TIEMPO_ESPERA,
-            )
-        except requests.RequestException as exc:
-            raise ErrorDeGIE(f"Error de red al consultar AGSI+: {exc}") from exc
+        codigo_http, carga = _get_json_gie(URL_AGSI, parametros, cabeceras, TIEMPO_ESPERA)
 
-        if respuesta.status_code == 401:
+        if codigo_http == 401:
             raise ErrorDeGIE(
                 "GIE rechazó la clave de API (401). Comprueba que GIE_API_KEY es correcta "
                 "y que tu cuenta está activada."
             )
-        if respuesta.status_code == 429:
+        if codigo_http == 429:
             raise ErrorDeGIE(
                 "GIE ha limitado las peticiones (429). Espera unos minutos o reduce "
                 "el número de países/años solicitados."
             )
-        try:
-            respuesta.raise_for_status()
-            carga = respuesta.json()
-        except Exception as exc:
-            raise ErrorDeGIE(f"Respuesta inválida de AGSI+ ({respuesta.status_code}): {exc}") from exc
+        if codigo_http != 200:
+            raise ErrorDeGIE(f"Respuesta inválida de AGSI+ (HTTP {codigo_http}).")
 
         paginas.append(_parsear_respuesta_gie(carga, pais))
 
